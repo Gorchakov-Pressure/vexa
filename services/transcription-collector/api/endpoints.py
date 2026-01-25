@@ -414,13 +414,12 @@ async def ws_authorize_subscribe(
         platform_value = meeting_ref.platform.value if isinstance(meeting_ref.platform, Platform) else str(meeting_ref.platform)
         native_id = meeting_ref.native_meeting_id
 
-        # Validate platform/native ID format via construct_meeting_url
-        try:
-            constructed = Platform.construct_meeting_url(platform_value, native_id)
-        except Exception:
-            constructed = None
-        if not constructed:
-            errors.append(f"meetings[{idx}] invalid native_meeting_id for platform '{platform_value}'")
+        # Note: meeting_ref is a Pydantic model (WsMeetingRef extends MeetingCreate),
+        # so platform/native_meeting_id has already been validated by shared schemas.
+        # Do not re-validate via construct_meeting_url here, because Teams may use
+        # URL-safe minted IDs (teams_<hash>) that cannot be expanded into a URL.
+        if not native_id or not str(native_id).strip():
+            errors.append(f"meetings[{idx}] missing native_meeting_id")
             continue
 
         stmt_meeting = select(Meeting).where(

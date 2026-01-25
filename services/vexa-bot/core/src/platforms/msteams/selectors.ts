@@ -298,6 +298,15 @@ export const teamsNameInputSelectors: string[] = [
   'input[type="text"]'
 ];
 
+// Passcode input selectors (some Teams flows require a passcode for guest join)
+export const teamsPasscodeInputSelectors: string[] = [
+  'input[type="password"]',
+  'input[aria-label*="passcode" i]',
+  'input[placeholder*="passcode" i]',
+  'input[name*="passcode" i]',
+  'input[autocomplete="one-time-code"]',
+];
+
 // Teams meeting container selectors
 export const teamsMeetingContainerSelectors: string[] = [
   '[role="main"]',

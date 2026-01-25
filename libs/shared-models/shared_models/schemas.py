@@ -8,6 +8,26 @@ import logging # Import logging for status validation warnings
 # Setup logger for status validation warnings
 logger = logging.getLogger(__name__)
 
+# --- Teams ID / URL helpers ---
+_TEAMS_NUMERIC_ID_RE = re.compile(r"^\d{10,15}$")
+# Normalized ID minted from join_url: "teams_" + base64url(sha256(url))[:16]
+_TEAMS_MINTED_ID_RE = re.compile(r"^teams_[A-Za-z0-9_-]{16}$")
+# Common Teams "meetup-join" URLs (variants exist, keep matching tolerant)
+_TEAMS_MEETUP_JOIN_RE = re.compile(
+    r"^(?:https?://)?teams\.microsoft\.com/(?:l/)?meetup-join/.*",
+    re.IGNORECASE,
+)
+
+def _looks_like_teams_meetup_join_url(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return False
+    return bool(_TEAMS_MEETUP_JOIN_RE.match(v))
+
+def _is_valid_teams_native_id(value: str) -> bool:
+    v = (value or "").strip()
+    return bool(_TEAMS_NUMERIC_ID_RE.fullmatch(v) or _TEAMS_MINTED_ID_RE.fullmatch(v) or _looks_like_teams_meetup_join_url(v))
+
 # --- Language Codes from faster-whisper ---
 # These are the accepted language codes from the faster-whisper library
 # Source: faster_whisper.tokenizer._LANGUAGE_CODES
@@ -239,15 +259,26 @@ class Platform(str, Enum):
                 else:
                      return None # Invalid ID format
             elif platform == Platform.TEAMS:
-                # Teams meeting ID (numeric) and optional passcode
-                # Only accept numeric meeting IDs, not full URLs
-                if re.fullmatch(r"^\d{10,15}$", native_id):
+                # Teams meeting ID and optional passcode.
+                # Support:
+                # - legacy numeric ID (10-15 digits) -> https://teams.live.com/meet/{id}[?p=passcode]
+                # - full Teams meetup-join URL -> return as-is (caller may also store it separately)
+                native_id = (native_id or "").strip()
+
+                if _looks_like_teams_meetup_join_url(native_id):
+                    # Normalize scheme for consistency
+                    if not native_id.lower().startswith(("http://", "https://")):
+                        native_id = f"https://{native_id.lstrip('/')}"
+                    return native_id
+
+                if _TEAMS_NUMERIC_ID_RE.fullmatch(native_id):
                     url = f"https://teams.live.com/meet/{native_id}"
                     if passcode:
                         url += f"?p={passcode}"
                     return url
-                else:
-                    return None # Invalid Teams ID format - must be numeric only
+
+                # Minted URL-safe IDs (teams_<hash>) cannot be expanded into a join URL without stored join_url.
+                return None
             else:
                 return None # Unknown platform
         except ValueError:
@@ -388,13 +419,13 @@ class MeetingCreate(BaseModel):
                 raise ValueError("Google Meet ID must be in format 'abc-defg-hij' (lowercase letters only)")
         
         elif platform == Platform.TEAMS:
-            # Teams format: numeric ID only (10-15 digits)
-            if not re.fullmatch(r"^\d{10,15}$", native_id):
-                raise ValueError("Teams meeting ID must be 10-15 digits only (not a full URL)")
-            
-            # Explicitly reject full URLs
-            if native_id.startswith(('http://', 'https://', 'teams.microsoft.com', 'teams.live.com')):
-                raise ValueError("Teams meeting ID must be the numeric ID only (e.g., '9399697580372'), not a full URL")
+            # Teams: allow legacy numeric IDs AND full Teams meetup-join URLs (UI-friendly),
+            # and also allow minted URL-safe IDs (teams_<hash>) for downstream routes / WS subscriptions.
+            if not _is_valid_teams_native_id(native_id):
+                raise ValueError(
+                    "Teams meeting ID must be either 10-15 digits, a Teams meetup-join URL "
+                    "(teams.microsoft.com/.../meetup-join/...), or a minted ID like 'teams_<hash>'."
+                )
         
         return v
 

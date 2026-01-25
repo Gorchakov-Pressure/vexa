@@ -5,6 +5,7 @@ export type BotConfig = {
   token: string,  // MeetingToken (HS256 JWT)
   connectionId: string,
   nativeMeetingId: string,
+  passcode?: string | null,
   language?: string | null,
   task?: string | null,
   redisUrl: string,

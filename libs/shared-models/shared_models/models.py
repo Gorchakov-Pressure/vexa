@@ -76,9 +76,36 @@ class Meeting(Base):
         
     @property
     def constructed_meeting_url(self) -> Optional[str]: # Added return type hint
-        # Calculate the URL on demand using the static method from schemas.py
-        if self.platform and self.platform_specific_id:
-             return Platform.construct_meeting_url(self.platform, self.platform_specific_id)
+        """
+        Best-effort URL for clients/logging.
+
+        Important: For Teams, we may store a URL-safe synthetic native id (e.g. teams_<hash>)
+        in platform_specific_id. In that case the real join URL is stored in meeting.data["join_url"].
+        """
+        if not self.platform:
+            return None
+
+        # Teams: prefer stored join_url (URL-safe native id cannot be expanded back)
+        if self.platform == Platform.TEAMS.value:
+            try:
+                if isinstance(self.data, dict):
+                    join_url = self.data.get("join_url")
+                    if isinstance(join_url, str) and join_url.strip():
+                        return join_url.strip()
+                    passcode = self.data.get("passcode")
+                else:
+                    passcode = None
+            except Exception:
+                passcode = None
+
+            # Legacy: numeric meeting id + optional passcode
+            if self.platform_specific_id:
+                return Platform.construct_meeting_url(self.platform, self.platform_specific_id, passcode if isinstance(passcode, str) and passcode.strip() else None)
+            return None
+
+        # Other platforms: compute from platform + native id
+        if self.platform_specific_id:
+            return Platform.construct_meeting_url(self.platform, self.platform_specific_id)
         return None
 
 class Transcription(Base):

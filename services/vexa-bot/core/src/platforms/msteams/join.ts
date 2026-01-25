@@ -6,6 +6,7 @@ import {
   teamsJoinButtonSelectors,
   teamsCameraButtonSelectors,
   teamsNameInputSelectors,
+  teamsPasscodeInputSelectors,
   teamsComputerAudioRadioSelectors,
   teamsDontUseAudioRadioSelectors,
   teamsSpeakerEnableSelectors,
@@ -151,6 +152,27 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
     log(`✅ Display name set to "${botConfig.botName}"`);
   } catch (error) {
     log("ℹ️ Display name input not found, continuing...");
+  }
+
+  log("Step 5.25: Checking for passcode prompt...");
+  try {
+    const passcodeInput = page.locator(teamsPasscodeInputSelectors.join(', ')).first();
+    const visible = await passcodeInput.isVisible().catch(() => false);
+    if (visible) {
+      if (botConfig.passcode && String(botConfig.passcode).trim()) {
+        await passcodeInput.fill(String(botConfig.passcode).trim());
+        log("✅ Passcode filled");
+        // Often enter advances the flow without needing a dedicated submit button
+        await passcodeInput.press("Enter").catch(() => {});
+        await page.waitForTimeout(300);
+      } else {
+        log("ℹ️ Passcode input is visible but no passcode provided. Continuing (may require lobby/approval or may fail).");
+      }
+    } else {
+      log("ℹ️ Passcode input not visible.");
+    }
+  } catch (error: any) {
+    log(`ℹ️ Passcode step skipped: ${error?.message || String(error)}`);
   }
 
   log("Step 5.5: Ensuring Computer audio is selected...");

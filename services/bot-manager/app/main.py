@@ -12,6 +12,7 @@ import json
 import httpx
 import hmac
 import uuid as uuid_lib
+import hashlib
 
 # Local imports - Remove unused ones
 # from app.database.models import init_db # Using local init_db now
@@ -38,6 +39,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import and_, desc, func
 from datetime import datetime # For start_time
+
+
+def _looks_like_teams_join_url(value: str) -> bool:
+    v = (value or "").strip()
+    if not v:
+        return False
+    # Accept full URL or URL-like without scheme
+    v_lower = v.lower()
+    return ("teams.microsoft.com" in v_lower and "meetup-join" in v_lower) or v_lower.startswith("teams.microsoft.com/l/meetup-join/")
+
+
+def _normalize_teams_join_url(value: str) -> str:
+    v = (value or "").strip()
+    if not v:
+        return v
+    if v.lower().startswith(("http://", "https://")):
+        return v
+    # Allow "teams.microsoft.com/..." as input
+    return f"https://{v.lstrip('/')}"
+
+
+def _mint_teams_native_id_from_join_url(join_url: str) -> str:
+    """
+    Create URL-safe stable native id for Teams join URLs.
+    Format: teams_<base64url(sha256(join_url))[:16]>
+    """
+    digest = hashlib.sha256(join_url.encode("utf-8")).digest()
+    h = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return f"teams_{h[:16]}"
 
 # --- Status Transition Helper ---
 
@@ -445,14 +475,30 @@ async def request_bot(
     user_token, current_user = auth_data
 
     logger.info(f"Received bot request for platform '{req.platform.value}' with native ID '{req.native_meeting_id}' from user {current_user.id}")
-    native_meeting_id = req.native_meeting_id
 
-    constructed_url = Platform.construct_meeting_url(req.platform.value, native_meeting_id, req.passcode)
+    # --- Teams URL normalization ---
+    # Input allows:
+    # - legacy numeric Teams ID (10-15 digits)
+    # - full Teams meetup-join URL (UI-friendly)
+    # For meetup-join URL we mint a URL-safe native id and store the original URL separately.
+    incoming_native_id = (req.native_meeting_id or "").strip()
+    join_url: Optional[str] = None
+    passcode: Optional[str] = (req.passcode or "").strip() or None
+
+    if req.platform.value == Platform.TEAMS.value and _looks_like_teams_join_url(incoming_native_id):
+        join_url = _normalize_teams_join_url(incoming_native_id)
+        native_meeting_id = _mint_teams_native_id_from_join_url(join_url)
+        constructed_url = join_url
+        logger.info(f"Teams join URL detected. Minted native_meeting_id='{native_meeting_id}'")
+    else:
+        native_meeting_id = incoming_native_id
+        constructed_url = Platform.construct_meeting_url(req.platform.value, native_meeting_id, passcode)
+
     if not constructed_url:
-        logger.error(f"Invalid meeting URL for platform {req.platform.value} and ID {native_meeting_id}. Rejecting request.")
+        logger.error(f"Invalid meeting URL for platform {req.platform.value} and ID {incoming_native_id}. Rejecting request.")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid platform/native_meeting_id combination: cannot construct meeting URL"
+            detail="Invalid platform/native_meeting_id combination: cannot construct meeting URL"
         )
 
     existing_meeting_stmt = select(Meeting).where(
@@ -498,10 +544,12 @@ async def request_bot(
     if existing_meeting is None:
         logger.info(f"No active/valid existing meeting found for user {current_user.id}, platform '{req.platform.value}', native ID '{native_meeting_id}'. Proceeding to create a new meeting record.")
         # Create Meeting record in DB
-        # Prepare data field with passcode if provided
-        meeting_data = {}
-        if req.passcode:
-            meeting_data['passcode'] = req.passcode
+        # Prepare data field with passcode/join_url if provided
+        meeting_data: Dict[str, Any] = {}
+        if passcode:
+            meeting_data["passcode"] = passcode
+        if join_url:
+            meeting_data["join_url"] = join_url
             
         new_meeting = Meeting(
             user_id=current_user.id,
@@ -608,7 +656,8 @@ async def request_bot(
             user_token=user_token,
             native_meeting_id=native_meeting_id,
             language=req.language,
-            task=req.task
+            task=req.task,
+            passcode=passcode,
         )
         container_start_time = datetime.utcnow()
         logger.info(f"Call to start_bot_container completed. Container ID: {container_id}, Connection ID: {connection_id}")
