@@ -1,7 +1,8 @@
 .PHONY: all setup submodules env force-env setup-transcription-service-env build-bot-image build build-transcription-service up up-transcription-service down down-transcription-service ps logs test test-api test-setup migrate makemigrations init-db stamp-db migrate-or-init migration-status
 
 # Default target: Sets up everything and starts the services
-all: setup-env build up migrate-or-init test
+# NOTE: `make test` is interactive (prompts for Google Meet ID) and will block in non-interactive runs.
+all: setup-env build up migrate-or-init test-setup
 
 # Target to set up only the environment without Docker
 setup-env: env submodules

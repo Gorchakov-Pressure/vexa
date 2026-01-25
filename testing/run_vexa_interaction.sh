@@ -220,8 +220,17 @@ if [[ -n "$1" ]]; then
     echo_info "Using provided Google Meet ID: $GOOGLE_MEET_ID"
 else
     # Interactive input
+    # IMPORTANT: If stdin is not a TTY (e.g., running via non-interactive `make`/CI),
+    # `read` will instantly hit EOF and this loop will spin at 100% CPU.
+    if [[ ! -t 0 ]]; then
+        echo_error "Нет интерактивного ввода (stdin не TTY). Запустите так: make test MEETING_ID=abc-defg-hij, или выполните скрипт в терминале."
+        exit 1
+    fi
     while true; do
-        read -p "Enter the Google Meet ID (e.g., abc-defg-hij): " GOOGLE_MEET_ID
+        if ! read -r -p "Enter the Google Meet ID (e.g., abc-defg-hij): " GOOGLE_MEET_ID; then
+            echo_error "Не удалось прочитать Google Meet ID (EOF). Запустите так: make test MEETING_ID=abc-defg-hij"
+            exit 1
+        fi
         # Basic validation for meet ID format (3 letters - 4 letters - 3 letters)
         if [[ "$GOOGLE_MEET_ID" =~ ^[a-zA-Z]{3}-[a-zA-Z]{4}-[a-zA-Z]{3}$ ]]; then
             break
