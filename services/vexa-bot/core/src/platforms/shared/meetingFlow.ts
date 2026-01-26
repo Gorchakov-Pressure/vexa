@@ -2,6 +2,7 @@ import { Page } from "playwright";
 import { BotConfig } from "../../types";
 import { log, callStartupCallback } from "../../utils";
 import { hasStopSignalReceived } from "../../index";
+import { callStatusChangeCallback } from "../../services/unified-callback";
 
 export type AdmissionDecision = {
   admitted: boolean;
@@ -42,6 +43,64 @@ export type PlatformStrategies = {
   startRemovalMonitor: (page: Page, onRemoval?: () => void | Promise<void>) => () => void;
   leave: (page: Page | null, botConfig?: BotConfig, reason?: LeaveReason) => Promise<boolean>;
 };
+
+function normalizeMeetingTitleCandidate(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  let v = value.replace(/\s+/g, " ").trim();
+  if (!v) return null;
+
+  // Strip common Teams noise / suffixes
+  v = v.replace(/\s*(\||-)\s*Microsoft Teams\s*$/i, "").trim();
+
+  // Reject obvious generic titles
+  const lower = v.toLowerCase();
+  if (!v || v.length < 3) return null;
+  if (lower === "microsoft teams" || lower === "microsoft teams meeting") return null;
+  if (lower === "join conversation" || lower === "join meeting") return null;
+  if (lower.includes("meetup-join")) return null;
+
+  if (v.length > 180) v = v.slice(0, 180).trim();
+  return v || null;
+}
+
+async function bestEffortExtractMeetingTitle(page: Page): Promise<string | null> {
+  // Best-effort. Never throw.
+  try {
+    const t = normalizeMeetingTitleCandidate(await page.title().catch(() => ""));
+    if (t) return t;
+  } catch {}
+
+  try {
+    const domTitle = await page.evaluate(() => {
+      const pick = (s: string) => (typeof s === "string" ? s.replace(/\s+/g, " ").trim() : "");
+
+      const metaOg = document.querySelector('meta[property="og:title"]') as HTMLMetaElement | null;
+      const metaTitle = document.querySelector('meta[name="title"]') as HTMLMetaElement | null;
+      const metaTwitter = document.querySelector('meta[name="twitter:title"]') as HTMLMetaElement | null;
+      const titleTag = document.querySelector("title");
+
+      const headings = Array.from(document.querySelectorAll('h1,h2,[role="heading"]'));
+      const headingText = headings
+        .map((el) => pick((el as HTMLElement).innerText || (el as HTMLElement).textContent || ""))
+        .filter(Boolean);
+
+      const candidates = [
+        pick(metaOg?.content || ""),
+        pick(metaTwitter?.content || ""),
+        pick(metaTitle?.content || ""),
+        pick(titleTag?.textContent || ""),
+        ...headingText,
+      ].filter(Boolean);
+
+      return candidates[0] || "";
+    });
+
+    const t = normalizeMeetingTitleCandidate(domTitle);
+    if (t) return t;
+  } catch {}
+
+  return null;
+}
 
 export async function runMeetingFlow(
   platform: string,
@@ -129,7 +188,13 @@ export async function runMeetingFlow(
     
     // Startup callback (sends ACTIVE status)
     try {
-      await callStartupCallback(botConfig);
+      // Try to capture meeting title early (may still be unavailable at this moment)
+      const earlyTitle = platform === "teams" ? await bestEffortExtractMeetingTitle(page) : null;
+      if (earlyTitle) {
+        log(`[Meeting Title] Early capture: "${earlyTitle}"`);
+      }
+
+      await callStartupCallback(botConfig, earlyTitle);
       
       // CRITICAL: Verify bot is still in meeting after callback (prevent false positives)
       // Use silent check to avoid sending AWAITING_ADMISSION callback again
@@ -141,6 +206,34 @@ export async function runMeetingFlow(
         return;
       }
       log("✅ Bot verified to be in meeting after ACTIVE callback");
+
+      // Post-admission title capture with retries: Teams often renders subject only inside the call UI.
+      if (platform === "teams") {
+        const MAX_MS = 60000;
+        const INTERVAL_MS = 2000;
+        const start = Date.now();
+        let lastSeen: string | null = earlyTitle || null;
+
+        while ((Date.now() - start) < MAX_MS) {
+          const t = await bestEffortExtractMeetingTitle(page);
+          if (t && t !== lastSeen) {
+            lastSeen = t;
+            log(`[Meeting Title] Captured after admission: "${t}" — sending update callback`);
+            try {
+              // Send a duplicate ACTIVE callback with meeting_title so bot-manager can persist it.
+              await callStatusChangeCallback(botConfig, "active", "meeting_title_discovered", undefined, undefined, undefined, undefined, t);
+            } catch (e: any) {
+              log(`[Meeting Title] Failed to send title callback: ${e?.message || String(e)}`);
+            }
+            break;
+          }
+          await new Promise(resolve => setTimeout(resolve, INTERVAL_MS));
+        }
+
+        if (!lastSeen) {
+          log("[Meeting Title] Not captured within retry window (best-effort).");
+        }
+      }
     } catch (error: any) {
       log(`Error during startup callback or verification: ${error?.message || String(error)}`);
       // Continue to recording phase even if callback/verification fails

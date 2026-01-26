@@ -8,8 +8,8 @@ export function randomDelay(amount: number) {
   return (2 * Math.random() - 1) * (amount / 10) + amount;
 }
 
-export async function callStartupCallback(botConfig: any): Promise<void> {
-  await callStatusChangeCallback(botConfig, "active");
+export async function callStartupCallback(botConfig: any, meetingTitle?: string | null): Promise<void> {
+  await callStatusChangeCallback(botConfig, "active", undefined, undefined, undefined, undefined, undefined, meetingTitle);
 }
 
 export async function callJoiningCallback(botConfig: any, meetingTitle?: string | null): Promise<void> {
