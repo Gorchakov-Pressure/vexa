@@ -13,6 +13,67 @@ import {
   teamsSpeakerDisableSelectors
 } from "./selectors";
 
+function _normalizeCandidateTitle(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  let v = value.replace(/\s+/g, " ").trim();
+  if (!v) return null;
+
+  // Strip common Teams suffix/prefix noise
+  v = v.replace(/\s*(\||-)\s*Microsoft Teams\s*$/i, "").trim();
+  v = v.replace(/^Microsoft Teams\s*(meeting\s*)?/i, "").trim();
+  v = v.replace(/^Microsoft Teams meeting\s*(\||-)\s*/i, "").trim();
+
+  if (!v) return null;
+  if (/^microsoft teams$/i.test(v)) return null;
+  if (/^microsoft teams meeting$/i.test(v)) return null;
+
+  // Reasonable bounds to avoid garbage
+  if (v.length < 3) return null;
+  if (v.length > 180) v = v.slice(0, 180).trim();
+
+  return v || null;
+}
+
+async function bestEffortExtractTeamsMeetingTitle(page: Page): Promise<string | null> {
+  // Best-effort: Teams UI changes often; never throw from here.
+  try {
+    const pageTitle = _normalizeCandidateTitle(await page.title().catch(() => ""));
+    if (pageTitle) return pageTitle;
+  } catch {}
+
+  try {
+    const domTitle = await page.evaluate(() => {
+      const pick = (s: string) => (typeof s === "string" ? s.replace(/\s+/g, " ").trim() : "");
+
+      const metaOg = document.querySelector('meta[property="og:title"]') as HTMLMetaElement | null;
+      const metaTitle = document.querySelector('meta[name="title"]') as HTMLMetaElement | null;
+      const metaTwitter = document.querySelector('meta[name="twitter:title"]') as HTMLMetaElement | null;
+      const titleTag = document.querySelector("title");
+
+      const headings = Array.from(document.querySelectorAll('h1,h2,[role="heading"]'));
+      const headingText = headings
+        .map((el) => pick((el as HTMLElement).innerText || (el as HTMLElement).textContent || ""))
+        .filter(Boolean);
+
+      const candidates = [
+        pick(metaOg?.content || ""),
+        pick(metaTwitter?.content || ""),
+        pick(metaTitle?.content || ""),
+        pick(titleTag?.textContent || ""),
+        ...headingText,
+      ].filter(Boolean);
+
+      // Return the first reasonable candidate; server-side normalization will handle noise
+      return candidates[0] || "";
+    });
+
+    const normalized = _normalizeCandidateTitle(domTitle);
+    if (normalized) return normalized;
+  } catch {}
+
+  return null;
+}
+
 export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Promise<void> {
   // Install RTCPeerConnection hook before any Teams scripts run - ensures remote audio tracks
   // are mirrored into hidden <audio> elements that BrowserAudioService can capture later.
@@ -106,7 +167,13 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
   await page.waitForTimeout(500);
   
   try {
-    await callJoiningCallback(botConfig);
+    const meetingTitle = await bestEffortExtractTeamsMeetingTitle(page);
+    if (meetingTitle) {
+      log(`Detected Teams meeting title: "${meetingTitle}"`);
+    } else {
+      log("ℹ️ Teams meeting title not detected (best-effort).");
+    }
+    await callJoiningCallback(botConfig, meetingTitle);
     log("Joining callback sent successfully");
   } catch (callbackError: any) {
     log(`Warning: Failed to send joining callback: ${callbackError.message}. Continuing with join process...`);

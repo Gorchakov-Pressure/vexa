@@ -30,6 +30,7 @@ export interface UnifiedCallbackPayload {
   platform_specific_error?: string;
   completion_reason?: CompletionReason;
   failure_stage?: FailureStage;
+  meeting_title?: string;
   timestamp?: string;
 }
 
@@ -44,7 +45,8 @@ export async function callStatusChangeCallback(
   exitCode?: number,
   errorDetails?: any,
   completionReason?: CompletionReason,
-  failureStage?: FailureStage
+  failureStage?: FailureStage,
+  meetingTitle?: string | null
 ): Promise<void> {log(`🔥 UNIFIED CALLBACK: ${status.toUpperCase()} - reason: ${reason || 'none'}`);
   
   if (!botConfig.botManagerCallbackUrl) {log("Warning: No bot manager callback URL configured. Cannot send status change callback.");
@@ -74,6 +76,7 @@ export async function callStatusChangeCallback(
         error_details: errorDetails,
         completion_reason: completionReason,
         failure_stage: failureStage,
+        meeting_title: (typeof meetingTitle === 'string' && meetingTitle.trim()) ? meetingTitle.trim() : undefined,
         timestamp: new Date().toISOString()
       };
 

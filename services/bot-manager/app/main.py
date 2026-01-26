@@ -326,6 +326,7 @@ class BotStatusChangePayload(BaseModel):
     platform_specific_error: Optional[str] = Field(None, description="Platform-specific error message.")
     completion_reason: Optional[MeetingCompletionReason] = Field(None, description="Reason for completion if applicable.")
     failure_stage: Optional[MeetingFailureStage] = Field(None, description="Stage where failure occurred if applicable.")
+    meeting_title: Optional[str] = Field(None, description="Meeting title/subject (best-effort from platform UI). Stored in meeting.data.name.")
     timestamp: Optional[str] = Field(None, description="Timestamp of the status change.")
 
 # --- --------------------------------------------- ---
@@ -1414,6 +1415,30 @@ async def bot_status_change_callback(
         # Refresh meeting to get latest status from database
         await db.refresh(meeting)
         logger.info(f"[DEBUG] Bot status change callback: Meeting {meeting_id} current status='{meeting.status}', requested status='{new_status.value}'")
+
+        # Best-effort meeting title from bot/platform UI: always overwrite meeting.data.name
+        try:
+            meeting_title = payload.meeting_title.strip() if isinstance(payload.meeting_title, str) else ""
+        except Exception:
+            meeting_title = ""
+
+        if meeting_title:
+            try:
+                if not meeting.data or not isinstance(meeting.data, dict):
+                    current_data: Dict[str, Any] = {}
+                else:
+                    current_data = dict(meeting.data)
+
+                current_data["name"] = meeting_title
+                meeting.data = current_data
+                from sqlalchemy.orm import attributes
+                attributes.flag_modified(meeting, "data")
+                await db.commit()
+                await db.refresh(meeting)
+                logger.info(f"[Meeting Title] Saved meeting.data.name for meeting {meeting.id}: '{meeting_title}'")
+            except Exception as title_err:
+                await db.rollback()
+                logger.warning(f"[Meeting Title] Failed to persist meeting title for meeting {meeting.id}: {title_err}")
 
         # Check if user stopped early (ignore transitions except for completed/failed)
         if (meeting.data and isinstance(meeting.data, dict) and 
