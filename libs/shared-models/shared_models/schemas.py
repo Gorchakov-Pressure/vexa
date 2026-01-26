@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Tuple, Any
-from pydantic import BaseModel, Field, EmailStr, field_validator, ValidationInfo
+from pydantic import BaseModel, Field, EmailStr, field_validator, ValidationInfo, ConfigDict
 from datetime import datetime
 from enum import Enum, auto
 import re # Import re for native ID validation
@@ -329,6 +329,107 @@ class UserUpdate(BaseModel):
     max_concurrent_bots: Optional[int] = Field(None, description="Maximum number of concurrent bots allowed for the user")
     data: Optional[Dict[str, Any]] = Field(None, description="JSONB storage for arbitrary user data, like webhook URLs and subscription info")
 # --- END UserUpdate Schema ---
+
+# --- User data (whitelisted) schemas for Vexa Dashboard ---
+VEXA_DASHBOARD_MAX_BOT_NAME_LENGTH = 100
+
+
+class VexaDashboardBotDefaults(BaseModel):
+    """
+    Whitelisted namespace for user-stored dashboard settings.
+
+    Stored at: users.data.vexa_dashboard.bot_defaults
+    """
+
+    bot_name: Optional[str] = Field(
+        None,
+        max_length=VEXA_DASHBOARD_MAX_BOT_NAME_LENGTH,
+        description="Имя бота по умолчанию (как отображается в созвоне).",
+    )
+    language: Optional[str] = Field(
+        None,
+        description="Язык по умолчанию. Должен быть одним из ACCEPTED_LANGUAGE_CODES (faster-whisper).",
+    )
+    task: Optional[str] = Field(
+        None,
+        description="Задача по умолчанию. Допустимые значения: transcribe | translate.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("bot_name")
+    @classmethod
+    def validate_bot_name(cls, v: Optional[str]):
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            raise ValueError("bot_name должен быть строкой")
+        vv = v.strip()
+        if not vv:
+            raise ValueError("bot_name не может быть пустым")
+        return vv
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, v: Optional[str]):
+        if v is not None and v != "" and v not in ACCEPTED_LANGUAGE_CODES:
+            raise ValueError(f"Invalid language code '{v}'. Must be one of: {sorted(ACCEPTED_LANGUAGE_CODES)}")
+        return v
+
+    @field_validator("task")
+    @classmethod
+    def validate_task(cls, v: Optional[str]):
+        if v is not None and v != "" and v not in ALLOWED_TASKS:
+            raise ValueError(f"Invalid task '{v}'. Must be one of: {sorted(ALLOWED_TASKS)}")
+        return v
+
+
+class VexaDashboardUserData(BaseModel):
+    bot_defaults: VexaDashboardBotDefaults = Field(
+        ...,
+        description="Настройки по умолчанию для создания бота в dashboard.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UserDataPatchRequest(BaseModel):
+    """
+    PATCH payload for /user/data (user auth via X-API-Key).
+
+    Only allows updates under data.vexa_dashboard.bot_defaults.
+    """
+
+    vexa_dashboard: VexaDashboardUserData = Field(
+        ...,
+        description="Whitelist-namespace: users.data.vexa_dashboard.bot_defaults",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UserDataResponse(BaseModel):
+    """Generic user data response (JSONB)."""
+
+    data: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Поле users.data целиком. Для dashboard используйте data.vexa_dashboard.bot_defaults.",
+    )
+
+
+class UserMeResponse(BaseModel):
+    """Minimal current user response for client/dashboard use."""
+
+    id: int
+    email: EmailStr
+    name: Optional[str] = None
+    max_concurrent_bots: int = Field(..., description="Maximum number of concurrent bots allowed for the user")
+    data: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="JSONB storage. Namespace for dashboard: data.vexa_dashboard.bot_defaults",
+    )
+
+    model_config = ConfigDict(from_attributes=True)
 
 # --- Meeting Schemas --- 
 

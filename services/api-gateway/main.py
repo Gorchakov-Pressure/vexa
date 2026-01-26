@@ -21,7 +21,8 @@ from shared_models.schemas import (
     UserCreate, UserResponse, TokenResponse, UserDetailResponse, # Admin Schemas
     ErrorResponse,
     Platform, # Import Platform enum for path parameters
-    BotStatusResponse # ADDED: Import response model for documentation
+    BotStatusResponse, # ADDED: Import response model for documentation
+    UserDataPatchRequest, UserDataResponse, UserMeResponse, # User data endpoints (dashboard)
 )
 
 load_dotenv()
@@ -593,6 +594,79 @@ async def set_user_webhook_proxy(request: Request):
     """Forward request to Admin API to set user webhook."""
     url = f"{ADMIN_API_URL}/user/webhook"
     return await forward_request(app.state.http_client, "PUT", url, request)
+
+@app.patch(
+    "/user/data",
+    tags=["User"],
+    summary="Update user dashboard settings (whitelisted)",
+    description=(
+        "Атомарно делает merge только в namespace `data.vexa_dashboard.bot_defaults`.\n\n"
+        "Whitelist ключей:\n"
+        "- `bot_name`: строка\n"
+        "- `language`: один из ACCEPTED_LANGUAGE_CODES\n"
+        "- `task`: transcribe | translate\n\n"
+        "Гарантирует, что другие ветки `data` (например `webhook_url`) не затираются."
+    ),
+    response_model=UserDataResponse,
+    dependencies=[Depends(api_key_scheme)],
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "schema": UserDataPatchRequest.schema(),
+                    "examples": {
+                        "vexa_dashboard_bot_defaults": {
+                            "summary": "Настройки по умолчанию для dashboard",
+                            "value": {
+                                "vexa_dashboard": {
+                                    "bot_defaults": {
+                                        "bot_name": "Vexa Bot",
+                                        "language": "ru",
+                                        "task": "transcribe",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "required": True,
+            "description": "Whitelist-namespace: data.vexa_dashboard.bot_defaults",
+        }
+    },
+)
+async def patch_user_data_proxy(request: Request):
+    """Forward request to Admin API to patch user data (whitelisted namespace)."""
+    url = f"{ADMIN_API_URL}/user/data"
+    return await forward_request(app.state.http_client, "PATCH", url, request)
+
+
+@app.get(
+    "/user/data",
+    tags=["User"],
+    summary="Get user data (users.data)",
+    description="Возвращает поле `users.data`. Для dashboard используйте `data.vexa_dashboard.bot_defaults`.",
+    response_model=UserDataResponse,
+    dependencies=[Depends(api_key_scheme)],
+)
+async def get_user_data_proxy(request: Request):
+    """Forward request to Admin API to fetch user data."""
+    url = f"{ADMIN_API_URL}/user/data"
+    return await forward_request(app.state.http_client, "GET", url, request)
+
+
+@app.get(
+    "/user/me",
+    tags=["User"],
+    summary="Get current user profile",
+    description="Возвращает минимум {id, email, name, max_concurrent_bots, data}.",
+    response_model=UserMeResponse,
+    dependencies=[Depends(api_key_scheme)],
+)
+async def get_user_me_proxy(request: Request):
+    """Forward request to Admin API to fetch current user profile."""
+    url = f"{ADMIN_API_URL}/user/me"
+    return await forward_request(app.state.http_client, "GET", url, request)
 
 # --- Admin API Routes --- 
 @app.api_route("/admin/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], 

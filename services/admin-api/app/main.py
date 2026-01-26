@@ -2,6 +2,7 @@ import logging
 import secrets
 import string
 import os
+import json
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Security, Response
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,15 +10,16 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload, attributes
 from typing import List # Import List for response model
 from datetime import datetime # Import datetime
-from sqlalchemy import func
+from sqlalchemy import func, text
 from pydantic import BaseModel, HttpUrl
 
 # Import shared models and schemas
 from shared_models.models import User, APIToken, Base, Meeting, Transcription, MeetingSession # Import Base for init_db and Meeting
 from shared_models.schemas import (UserCreate, UserResponse, TokenResponse, UserDetailResponse, UserBase, UserUpdate, MeetingResponse,
                                  UserTableResponse, MeetingTableResponse, MeetingSessionResponse, TranscriptionStats, 
-                                 MeetingPerformanceMetrics, MeetingTelematicsResponse, UserMeetingStats, 
-                                 UserUsagePatterns, UserAnalyticsResponse) # Import analytics schemas
+                                 MeetingPerformanceMetrics, MeetingTelematicsResponse, UserMeetingStats,
+                                 UserUsagePatterns, UserAnalyticsResponse,
+                                 UserDataPatchRequest, UserDataResponse, UserMeResponse) # Import analytics + user-data schemas
 
 # Database utilities (needs to be created)
 from shared_models.database import get_db, init_db # New import
@@ -137,6 +139,83 @@ async def set_user_webhook(
     logger.info(f"Updated webhook URL for user {user.email}")
     
     return UserResponse.model_validate(user)
+
+@user_router.patch(
+    "/data",
+    response_model=UserDataResponse,
+    summary="Обновить данные пользователя (только namespace vexa_dashboard)",
+    description=(
+        "Атомарно делает merge только в `users.data.vexa_dashboard.bot_defaults`.\n\n"
+        "Whitelist: `bot_name`, `language`, `task`.\n"
+        "Гарантирует, что остальные ветки `users.data` (например `webhook_url`) не затираются."
+    ),
+)
+async def patch_user_data(
+    payload: UserDataPatchRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Atomic update of a whitelisted JSONB namespace:
+    users.data.vexa_dashboard.bot_defaults
+    """
+    patch = payload.vexa_dashboard.bot_defaults.model_dump(exclude_unset=True, exclude_none=True)
+    if not patch:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пустой patch: нечего обновлять")
+
+    # Atomic SQL-level merge (single UPDATE statement).
+    # data = jsonb_set(data, '{vexa_dashboard,bot_defaults}', COALESCE(data->'vexa_dashboard'->'bot_defaults','{}') || patch, true)
+    stmt = text(
+        """
+        UPDATE users
+        SET data = jsonb_set(
+            COALESCE(data, '{}'::jsonb),
+            '{vexa_dashboard,bot_defaults}',
+            COALESCE(data->'vexa_dashboard'->'bot_defaults', '{}'::jsonb) || (:patch)::jsonb,
+            true
+        )
+        WHERE id = :user_id
+        RETURNING data
+        """
+    )
+
+    result = await db.execute(
+        stmt,
+        {
+            "user_id": user.id,
+            "patch": json.dumps(patch, ensure_ascii=False),
+        },
+    )
+    row = result.first()
+    await db.commit()
+
+    if row is None:
+        # Should not happen for an authenticated user, but keep safe behavior.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Keep in-memory object consistent for response.
+    user.data = row[0] if row[0] is not None else {}
+    return UserDataResponse(data=user.data)
+
+
+@user_router.get(
+    "/data",
+    response_model=UserDataResponse,
+    summary="Получить данные пользователя (users.data)",
+    description="Возвращает поле `users.data`. Для dashboard используйте `data.vexa_dashboard.bot_defaults`.",
+)
+async def get_user_data(user: User = Depends(get_current_user)):
+    return UserDataResponse(data=user.data or {})
+
+
+@user_router.get(
+    "/me",
+    response_model=UserMeResponse,
+    summary="Получить профиль текущего пользователя",
+    description="Возвращает минимум {id, email, name, max_concurrent_bots, data}.",
+)
+async def get_user_me(user: User = Depends(get_current_user)):
+    return UserMeResponse.model_validate(user)
 
 # --- Admin Endpoints (Copied and adapted from bot-manager/admin.py) --- 
 @admin_router.post("/users",
