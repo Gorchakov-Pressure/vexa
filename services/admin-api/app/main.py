@@ -164,14 +164,29 @@ async def patch_user_data(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пустой patch: нечего обновлять")
 
     # Atomic SQL-level merge (single UPDATE statement).
-    # data = jsonb_set(data, '{vexa_dashboard,bot_defaults}', COALESCE(data->'vexa_dashboard'->'bot_defaults','{}') || patch, true)
+    #
+    # Important nuance: jsonb_set(create_if_missing=true) does NOT create missing intermediate objects.
+    # So we first ensure `data.vexa_dashboard` is an object, then set/merge `bot_defaults` under it.
     stmt = text(
         """
         UPDATE users
         SET data = jsonb_set(
-            COALESCE(data, '{}'::jsonb),
+            jsonb_set(
+                COALESCE(data, '{}'::jsonb),
+                '{vexa_dashboard}',
+                CASE
+                    WHEN jsonb_typeof(data->'vexa_dashboard') = 'object' THEN data->'vexa_dashboard'
+                    ELSE '{}'::jsonb
+                END,
+                true
+            ),
             '{vexa_dashboard,bot_defaults}',
-            COALESCE(data->'vexa_dashboard'->'bot_defaults', '{}'::jsonb) || (:patch)::jsonb,
+            (
+                CASE
+                    WHEN jsonb_typeof(data->'vexa_dashboard'->'bot_defaults') = 'object' THEN data->'vexa_dashboard'->'bot_defaults'
+                    ELSE '{}'::jsonb
+                END
+            ) || (:patch)::jsonb,
             true
         )
         WHERE id = :user_id
